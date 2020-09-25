@@ -599,4 +599,26 @@ public class GridTableViewer extends AbstractTableViewer {
         return new CellSelection(objectList, indiceLists, focusElement, getComparer());
     }
 
+    /**
+     * {@inheritDoc}
+     * <p/>
+     * This implementation was added to ensure that <code>null</code> is returned
+     * for any point that is in the "row header" area.
+     */
+    @Override
+    public ViewerCell getCell(Point point) {
+        // check if the row is valid
+        ViewerRow viewerRow = getViewerRow(point);
+        if (viewerRow == null) {
+            return null;
+        }
+        // check if it is a "row header" cell
+        int rowHeaderWidth = getGrid().getRowHeaderWidth();
+        if (point.x >= 0 && point.x < rowHeaderWidth) {
+            return null;
+        }
+        // try the normal implementation, for normal cells
+        return super.getCell(point);
+    }
+
 }

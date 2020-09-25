@@ -24,6 +24,7 @@
  *    Pinard-Legry Guilhaume <guilhaume_pl@yahoo.fr> - bugfix in 267057
  *    Thorsten Schenkel <thorsten.schenkel@compeople.de> - bugfix in 356803
  *    Mirko Paturzo <mirko.paturzo@exeura.eu> - improvement (bugfix in 419928)
+ *    Antonio Rusu <antonio.rusu@pinteam.eu> - initial implementation for "frozen" columns
  *******************************************************************************/
 package org.eclipse.nebula.widgets.grid;
 
@@ -239,6 +240,11 @@ public class Grid extends Canvas {
 	// private static final int ROW_HEADER_SIZING_MULTIPLIER = 10;
 
 	/**
+	 * Special width value for columns which should NOT be drawn.
+	 */
+	private static final int DO_NOT_DRAW_COLUMN = Integer.MIN_VALUE;
+
+	/**
 	 * Tracks whether the scroll values are correct. If not they will be recomputed
 	 * in onPaint. This allows us to get a free ride on top of the OS's paint event
 	 * merging to assure that we don't perform this expensive operation when
@@ -367,6 +373,11 @@ public class Grid extends Canvas {
 	 * Renderer used to paint on top of an already painted row to denote focus.
 	 */
 	private IRenderer focusRenderer = new DefaultFocusRenderer();
+
+	/**
+	 * The number of leftmost columns that are "frozen" (fixed, always visible).
+	 */
+	private int cntFrozenColumns = 0;
 
 	/**
 	 * Are row headers visible?
@@ -655,18 +666,6 @@ public class Grid extends Canvas {
 	 * @see #topIndex
 	 */
 	int bottomIndex = -1;
-
-	/**
-	 * Index of the first visible column. A value of -1 indicates that the value is
-	 * old and will be recomputed.
-	 */
-	int startColumnIndex = -1;
-
-	/**
-	 * Index of the the last visible column. A value of -1 indicates that the value
-	 * is old and will be recomputed.
-	 */
-	int endColumnIndex = -1;
 
 	/**
 	 * True if the last visible item is completely visible. The value must never be
@@ -1273,29 +1272,17 @@ public class Grid extends Canvas {
 
 		GridColumn overThis = null;
 
-		int x2 = 0;
-
-		if (rowHeaderVisible) {
-			if (point.x <= rowHeaderWidth) {
-				return null;
-			}
-
-			x2 += rowHeaderWidth;
-		}
-
-		x2 -= getHScrollSelectionInPixels();
-
-		for (final GridColumn column : displayOrderedColumns) {
-			if (!column.isVisible()) {
+		int[] xCols = getColumnXPositions();
+		for (int i = 0; i < displayOrderedColumns.size(); i++) {
+			final GridColumn column = displayOrderedColumns.get(i);
+			final int x2 = xCols[i];
+			if (x2 == DO_NOT_DRAW_COLUMN) {
 				continue;
 			}
-
 			if (point.x >= x2 && point.x < x2 + column.getWidth()) {
 				overThis = column;
 				break;
 			}
-
-			x2 += column.getWidth();
 		}
 
 		if (overThis == null) {
@@ -3836,12 +3823,50 @@ public class Grid extends Canvas {
 	public void setRowHeaderVisible(final boolean show, final int minWidth) {
 		checkWidget();
 		rowHeaderVisible = show;
-		setColumnScrolling(true);
+		if (rowHeaderVisible) {
+			setColumnScrolling(true);
+		}
 
 		if (show && isAutoWidth()) {
 			computeRowHeaderWidth(minWidth);
 		}
 
+		redraw();
+	}
+
+	/**
+	 * Sets the number of "frozen" columns - i.e. the leftmost columns which are
+	 * always fixed in place (are not scrolled horizontally).
+	 * <p/>
+	 * When the number of frozen columns is greater than 0, horizontal scrolling
+	 * is always done by column rather than by pixel.
+	 *
+	 * @param cnt
+	 *            the number of columns to be set as "frozen".
+	 * @throws org.eclipse.swt.SWTException
+	 *             <ul>
+	 *             <li>ERROR_WIDGET_DISPOSED - if the receiver has been
+	 *             disposed</li>
+	 *             <li>ERROR_THREAD_INVALID_ACCESS - if not called from the thread
+	 *             that created the receiver</li>
+	 *             </ul>
+	 */
+	public void setFrozenColumnCount(final int cnt) {
+		checkWidget();
+		// range check
+		if (cnt <= 0) {
+			cntFrozenColumns = 0;
+		}
+		else if (cnt >= displayOrderedColumns.size()) {
+			cntFrozenColumns = displayOrderedColumns.size();
+		}
+		else {
+			cntFrozenColumns = cnt;
+		}
+		// enable header scrolling if at least one column is frozen
+		if (cntFrozenColumns > 0) {
+			setColumnScrolling(true);
+		}
 		redraw();
 	}
 
@@ -4504,42 +4529,6 @@ public class Grid extends Canvas {
 	}
 
 	/**
-	 * Returns the x position of the given column. Takes into account scroll
-	 * position.
-	 *
-	 * @param column
-	 *            given column
-	 * @return x position
-	 */
-	private int getColumnHeaderXPosition(final GridColumn column) {
-		if (!column.isVisible()) {
-			return -1;
-		}
-
-		int x = 0;
-
-		x -= getHScrollSelectionInPixels();
-
-		if (rowHeaderVisible) {
-			x += rowHeaderWidth;
-		}
-		for (final GridColumn column2 : displayOrderedColumns) {
-
-			if (!column2.isVisible()) {
-				continue;
-			}
-
-			if (column2 == column) {
-				break;
-			}
-
-			x += column2.getWidth();
-		}
-
-		return x;
-	}
-
-	/**
 	 * Returns the hscroll selection in pixels. This method abstracts away the
 	 * differences between column by column scrolling and pixel based scrolling.
 	 *
@@ -4549,7 +4538,7 @@ public class Grid extends Canvas {
 		int selection = hScroll.getSelection();
 		if (columnScrolling) {
 			int pixels = 0;
-			for (int i = 0; i < selection; i++) {
+			for (int i = cntFrozenColumns; i < selection && i < displayOrderedColumns.size(); i++) {
 				final GridColumn gridColumn = displayOrderedColumns.get(i);
 				if (gridColumn.isVisible()) {
 					pixels += gridColumn.getWidth();
@@ -5036,16 +5025,11 @@ public class Grid extends Canvas {
 	private boolean handleHoverOnColumnResizer(final int x, final int y) {
 		boolean over = false;
 		if (y <= headerHeight) {
-			int x2 = 0;
-
-			if (rowHeaderVisible) {
-				x2 += rowHeaderWidth;
-			}
-
-			x2 -= getHScrollSelectionInPixels();
-
-			for (final GridColumn column : displayOrderedColumns) {
-				if (!column.isVisible()) {
+			int[] xCols = getColumnXPositions();
+			for (int i = 0; i < displayOrderedColumns.size(); i++) {
+				final GridColumn column = displayOrderedColumns.get(i);
+				int x2 = xCols[i];
+				if (x2 == DO_NOT_DRAW_COLUMN) {
 					continue;
 				}
 				x2 += column.getWidth();
@@ -5256,13 +5240,9 @@ public class Grid extends Canvas {
 		}
 
 		int row = firstItemToDraw;
+		int[] xCols = getColumnXPositions();
 
 		for (int i = 0; i < visibleRows + (firstVisibleIndex - firstItemToDraw); i++) {
-
-			x = 0;
-
-			x -= getHScrollSelectionInPixels();
-
 			// get the item to draw
 			GridItem item = null;
 			if (row < items.size()) {
@@ -5280,23 +5260,19 @@ public class Grid extends Canvas {
 			if (item != null) {
 				boolean cellInRowSelected = false;
 
-				if (rowHeaderVisible) {
-
-					// row header is actually painted later
-					x += rowHeaderWidth;
-				}
-
 				final int focusY = y;
 
 				int colIndex = 0;
 
 				// draw regular cells for each column
-				for (final GridColumn column : displayOrderedColumns) {
+				for (int idx = 0; idx < displayOrderedColumns.size(); idx++) {
+					final GridColumn column = displayOrderedColumns.get(idx);
+					x = xCols[idx];
 
 					final boolean skipCell = cellSpanManager.skipCell(colIndex, row);
 					final int indexOfColumn = indexOf(column);
 
-					if (!column.isVisible()) {
+					if (x == DO_NOT_DRAW_COLUMN) {
 						colIndex++;
 						if (skipCell) {
 							cellSpanManager.consumeCell(colIndex, row);
@@ -5449,13 +5425,13 @@ public class Grid extends Canvas {
 				emptyCellRenderer.setSelected(false);
 				emptyCellRenderer.setRow(i + 1);
 
-				for (final GridColumn column : displayOrderedColumns) {
-
-					if (column.isVisible()) {
+				for (int idx = 0; idx < displayOrderedColumns.size(); idx++) {
+					final GridColumn column = displayOrderedColumns.get(idx);
+					x = xCols[idx];
+					if (x != DO_NOT_DRAW_COLUMN) {
 						emptyCellRenderer.setBounds(x, y, column.getWidth(), getItemHeight());
 						emptyCellRenderer.setColumn(indexOf(column));
 						emptyCellRenderer.paint(e.gc, this);
-
 						x += column.getWidth();
 					}
 				}
@@ -5590,29 +5566,20 @@ public class Grid extends Canvas {
 	private void paintHeader(final GC gc) {
 		int x = 0;
 		int y = 0;
-
-		x -= getHScrollSelectionInPixels();
-
-		if (rowHeaderVisible) {
-			// paint left corner
-			// topLeftRenderer.setBounds(0, y, rowHeaderWidth, headerHeight);
-			// topLeftRenderer.paint(gc, null);
-			x += rowHeaderWidth;
-		}
-
+		int[] xCols = getColumnXPositions();
 		GridColumnGroup previousPaintedGroup = null;
 
-		for (final GridColumn column : displayOrderedColumns) {
+		for (int idx = 0; idx < displayOrderedColumns.size(); idx++) {
+			final GridColumn column = displayOrderedColumns.get(idx);
+			x = xCols[idx];
 			if (x > getClientArea().width) {
 				break;
 			}
-
-			int height = 0;
-
-			if (!column.isVisible()) {
+			if (x == DO_NOT_DRAW_COLUMN) {
 				continue;
 			}
 
+			int height = 0;
 			if (column.getColumnGroup() != null) {
 
 				if (column.getColumnGroup() != previousPaintedGroup) {
@@ -5733,26 +5700,19 @@ public class Grid extends Canvas {
 	private void paintFooter(final GC gc) {
 		int x = 0;
 		int y = 0;
+		int[] xCols = getColumnXPositions();
 
-		x -= getHScrollSelectionInPixels();
-
-		if (rowHeaderVisible) {
-			// paint left corner
-			// topLeftRenderer.setBounds(0, y, rowHeaderWidth, headerHeight);
-			// topLeftRenderer.paint(gc, null);
-			x += rowHeaderWidth;
-		}
-
-		for (final GridColumn column : displayOrderedColumns) {
+		for (int idx = 0; idx < displayOrderedColumns.size(); idx++) {
+			final GridColumn column = displayOrderedColumns.get(idx);
+			x = xCols[idx];
 			if (x > getClientArea().width) {
 				break;
 			}
-
-			int height = 0;
-
-			if (!column.isVisible()) {
+			if (x == DO_NOT_DRAW_COLUMN) {
 				continue;
 			}
+
+			int height = 0;
 
 			height = footerHeight;
 			y = getClientArea().height - height;
@@ -5847,55 +5807,46 @@ public class Grid extends Canvas {
 
 		// if the scrollbar is visible set its values
 		if (hScroll.getVisible()) {
+			int hiddenArea = preferredSize.x - clientArea.width + 1;
 
 			if (!columnScrolling) {
 				// horizontal scrolling works pixel by pixel
-
-				final int hiddenArea = preferredSize.x - clientArea.width + 1;
-
 				// if possible, remember selection, if selection is too large,
-				// just
-				// make it the max you can
+				// just make it the max you can
 				final int selection = Math.min(hScroll.getSelection(), hiddenArea - 1);
-
 				hScroll.setValues(selection, 0, hiddenArea + clientArea.width - 1, clientArea.width,
 						HORZ_SCROLL_INCREMENT, clientArea.width);
 			} else {
 				// horizontal scrolling is column by column
-
-				int hiddenArea = preferredSize.x - clientArea.width + 1;
-
 				int max = 0;
-				int i = 0;
-
-				while (hiddenArea > 0 && i < getColumnCount()) {
+				for (int i = cntFrozenColumns; hiddenArea > 0 && i < displayOrderedColumns.size(); i++) {
 					final GridColumn col = displayOrderedColumns.get(i);
-
-					i++;
-
 					if (col.isVisible()) {
 						hiddenArea -= col.getWidth();
-						max++;
+						max = i;
 					}
 				}
+				max += 2;
 
-				max++;
-
-				// max should never be greater than the number of visible cols
+				// max should never be greater than the number of visible columns
 				int visCols = 0;
-				for (final GridColumn element : columns) {
-					if (element.isVisible()) {
-						visCols++;
+				for (int idx = 0; idx < displayOrderedColumns.size(); idx++) {
+					final GridColumn column = displayOrderedColumns.get(idx);
+					if (column.isVisible()) {
+						visCols = idx;
 					}
 				}
 				max = Math.min(visCols, max);
 
 				// if possible, remember selection, if selection is too large,
-				// just
-				// make it the max you can
-				final int selection = Math.min(hScroll.getSelection(), max);
-
-				hScroll.setValues(selection, 0, max, 1, 1, 1);
+				// just make it the max you can
+				int selection = Math.min(hScroll.getSelection(), max);
+				// also make sure to start selection from cntFrozenColumns
+				selection = Math.max(selection, cntFrozenColumns);
+				if (cntFrozenColumns >= max) {
+					selection = max = cntFrozenColumns;
+				}
+				hScroll.setValues(selection, cntFrozenColumns, max, 1, 1, 1);
 			}
 		}
 
@@ -7465,21 +7416,12 @@ public class Grid extends Canvas {
 	 */
 	Point getOrigin(final GridColumn column, final GridItem item) {
 		int x = 0;
-
-		if (rowHeaderVisible) {
-			x += rowHeaderWidth;
-		}
-
-		x -= getHScrollSelectionInPixels();
-
-		for (final GridColumn colIter : displayOrderedColumns) {
-
+		int[] xCols = getColumnXPositions();
+		for (int i = 0; i < displayOrderedColumns.size(); i++) {
+			final GridColumn colIter = displayOrderedColumns.get(i);
+			x = xCols[i];
 			if (colIter == column) {
 				break;
-			}
-
-			if (colIter.isVisible()) {
-				x += colIter.getWidth();
 			}
 		}
 
@@ -8235,6 +8177,9 @@ public class Grid extends Canvas {
 	public void setColumnScrolling(final boolean columnScrolling) {
 		checkWidget();
 		if (rowHeaderVisible && !columnScrolling) {
+			return;
+		}
+		if (cntFrozenColumns > 0 && !columnScrolling) {
 			return;
 		}
 
@@ -10186,11 +10131,24 @@ public class Grid extends Canvas {
 	 * @return all currently visible rows and columns
 	 */
 	public GridVisibleRange getVisibleRange() {
+		checkWidget();
+
 		// FIXME I think we should remember the topIndex in the onPaint-method
 		final int topIndex = getTopIndex();
 		final int bottomIndex = getBottomIndex();
-		final int startColumnIndex = getStartColumnIndex();
-		final int endColumnIndex = getEndColumnIndex();
+		final int startColumnIndex = hScroll.getVisible() ? hScroll.getSelection() : cntFrozenColumns;
+
+		int endColumnIndex = 0;
+		if (getVisibleGridWidth() > 0) {
+			int displayWidth = getClientArea().width;
+			int[] xCols = getColumnXPositions();
+			for (int i = 0; i < displayOrderedColumns.size(); i++) {
+				if (xCols[i] > displayWidth) {
+					break;
+				}
+				endColumnIndex = i;
+			}
+		}
 
 		final GridVisibleRange range = new GridVisibleRange();
 		range.items = new GridItem[0];
@@ -10205,83 +10163,25 @@ public class Grid extends Canvas {
 			}
 		}
 
-		if (startColumnIndex <= endColumnIndex) {
-			if (displayOrderedColumns.size() > 0) {
-				final List<GridColumn> cols = new ArrayList<>();
-				for (int i = startColumnIndex; i <= endColumnIndex; i++) {
-					final GridColumn col = displayOrderedColumns.get(i);
-					if (col.isVisible()) {
-						cols.add(col);
-					}
+		if (displayOrderedColumns.size() > 0) {
+			final List<GridColumn> cols = new ArrayList<>();
+			for (int i = 0; i < cntFrozenColumns; i++) {
+				final GridColumn col = displayOrderedColumns.get(i);
+				if (col.isVisible()) {
+					cols.add(col);
 				}
-
-				range.columns = new GridColumn[cols.size()];
-				cols.toArray(range.columns);
 			}
+			for (int i = startColumnIndex; i <= endColumnIndex; i++) {
+				final GridColumn col = displayOrderedColumns.get(i);
+				if (col.isVisible()) {
+					cols.add(col);
+				}
+			}
+			range.columns = new GridColumn[cols.size()];
+			cols.toArray(range.columns);
 		}
 
 		return range;
-	}
-
-	int getStartColumnIndex() {
-		checkWidget();
-
-		if (startColumnIndex != -1) {
-			return startColumnIndex;
-		}
-
-		if (!hScroll.getVisible()) {
-			startColumnIndex = 0;
-		}
-
-		startColumnIndex = hScroll.getSelection();
-
-		return startColumnIndex;
-	}
-
-	int getEndColumnIndex() {
-		checkWidget();
-
-		if (endColumnIndex != -1) {
-			return endColumnIndex;
-		}
-
-		if (displayOrderedColumns.size() == 0) {
-			endColumnIndex = 0;
-		} else if (getVisibleGridWidth() < 1) {
-			endColumnIndex = getStartColumnIndex();
-		} else {
-			int x = 0;
-			x -= getHScrollSelectionInPixels();
-
-			if (rowHeaderVisible) {
-				// row header is actually painted later
-				x += rowHeaderWidth;
-			}
-
-			final int startIndex = getStartColumnIndex();
-			final GridColumn[] columns = new GridColumn[displayOrderedColumns.size()];
-			displayOrderedColumns.toArray(columns);
-
-			for (int i = startIndex; i < columns.length; i++) {
-				endColumnIndex = i;
-				final GridColumn column = columns[i];
-
-				if (column.isVisible()) {
-					x += column.getWidth();
-				}
-
-				if (x > getClientArea().width) {
-
-					break;
-				}
-			}
-
-		}
-
-		endColumnIndex = Math.max(0, endColumnIndex);
-
-		return endColumnIndex;
 	}
 
 	void setSizeOnEveryItemImageChange(final boolean sizeOnEveryItemImageChange) {
@@ -10490,6 +10390,19 @@ public class Grid extends Canvas {
 		if (sourceListener == null) {
 			SWT.error(SWT.ERROR_NULL_ARGUMENT);
 		}
+
+		// TODO FIX for RCPTT
+		// mouse listeners that come from ColumnViewer must be registered AS IS
+		// (so that RCPTT can identify them and extract the viewer from a Grid instance)
+		Class<? extends MouseListener> listenerClass = sourceListener.getClass();
+		String canonicalName = listenerClass.getCanonicalName();
+		String regularName = listenerClass.getName();
+		if (canonicalName == null && regularName.startsWith("org.eclipse.jface.viewers.ColumnViewer")) {
+			super.addMouseListener(sourceListener);
+			return;
+		}
+		// END FIX for RCPTT
+
 		addListener(SWT.MouseUp, e -> {
 			sourceListener.mouseUp(new MouseEvent(e));
 		});
@@ -10522,7 +10435,60 @@ public class Grid extends Canvas {
 		} else {
 			super.addListener(eventType, listener);
 		}
+	}
 
+	/**
+	 * Compute the X position for each column.
+	 * Takes into account: the visibility of each column, frozen columns, whether the row headers are visible or not, horizontal scroll position.
+	 * @return An array with the starting X position for each column. Contains MIN_INT for columns which are not displayed
+	 */
+	private int[] getColumnXPositions() {
+		int[] xpos = new int[displayOrderedColumns.size()];
+		int fixedWidth = (rowHeaderVisible) ? rowHeaderWidth : 0;
+		// first the frozen columns
+		for (int i = 0; i < cntFrozenColumns && i < displayOrderedColumns.size(); i++) {
+			final GridColumn column = displayOrderedColumns.get(i);
+			if (column.isVisible()) {
+				xpos[i] = fixedWidth;
+				fixedWidth += column.getWidth();
+			}
+			else {
+				xpos[i] = DO_NOT_DRAW_COLUMN;
+			}
+		}
+		// next the non-frozen columns
+		int x = fixedWidth - getHScrollSelectionInPixels();
+		for (int i = cntFrozenColumns; i < displayOrderedColumns.size(); i++) {
+			final GridColumn column = displayOrderedColumns.get(i);
+			xpos[i] = DO_NOT_DRAW_COLUMN;
+			if (column.isVisible()) {
+				if (!columnScrolling || x >= fixedWidth) {
+					xpos[i] = x;
+				}
+				x += column.getWidth();
+			}
+		}
+		return xpos;
+	}
+
+	/**
+	 * Returns the x position of the given column. Takes into account scroll
+	 * position.
+	 *
+	 * @param column
+	 *            given column
+	 * @return x position
+	 */
+	private int getColumnHeaderXPosition(final GridColumn column) {
+		if (!column.isVisible()) {
+			return -1;
+		}
+		int idx = displayOrderedColumns.indexOf(column);
+		if (idx < 0) {
+			return -1;
+		}
+		int[] xCols = getColumnXPositions();
+		return xCols[idx];
 	}
 
 }
